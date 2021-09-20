@@ -7,10 +7,6 @@ var spawn = require("child_process").spawn,
 	through = require("through"),
 	concat = require("concat-stream");
 
-module.exports.setFfmpegPath = function(path) {
-	ffmpeg = spawn.bind(null, path || "ffmpeg");
-};
-
 module.exports.read = function(src, options, callback) {
 	if (typeof options === "function") {
 		callback = options;
@@ -66,7 +62,6 @@ module.exports.write = function(src, data, options, callback) {
 	if (options.dryRun) {
 		return args;
 	}
-
 	var proc = ffmpeg(args),
 		stream = through(),
 		error = concat();
@@ -115,12 +110,94 @@ module.exports.write = function(src, data, options, callback) {
 	return stream;
 };
 
+
+
+
+module.exports.merge = function(src, src2, options, callback) {
+	if (typeof options === "function") {
+		callback = options;
+		options = {};
+	}//ffmpeg -i video.mp4 -i audio.mp3 -c:v copy -c:a aac output.mp4
+
+	var dst = getTempPath(src),
+		args = ['-i', src, '-i', src2, '-c:v', 'copy', '-c:a', 'aac', dst ] //getWriteArgs(src, dst, data, options);
+
+		
+
+	if (options.dryRun) {
+		return args;
+	}
+	var proc = ffmpeg(args),
+		stream = through(),
+		error = concat();
+
+	// Proxy any child process error events
+	proc.on("error", stream.emit.bind(stream, "error"));
+
+	// Proxy child process stdout but don't end the stream until we know
+	// the process exits with a zero exit code
+	proc.stdout.on("data", stream.emit.bind(stream, "data"));
+
+	// Capture stderr (to use in case of non-zero exit code)
+	proc.stderr.pipe(error);
+
+	proc.on("close", function(code) {
+		if (code === 0) {
+			finish();
+		}
+		else {
+			handleError(new Error(error.getBody().toString()));
+		}
+	});
+
+	if (callback) {
+		stream.on("end", callback);
+		stream.on("error", callback);
+	}
+
+	function handleError(err) {
+		fs.unlink(dst, function() {
+			stream.emit("error", err);
+		});
+	}
+
+	function finish() {
+		fs.rename(dst, src, function(err) {
+			if (err) {
+				handleError(err);
+			}
+			else {
+				stream.emit("end");
+			}
+		});
+	}
+
+	return stream;
+};
+
+
+module.exports.checkffmpeg = function() {
+	return new Promise( async ( resolve ) => {
+		var test = ffmpeg( ['-version'] );
+
+		test.on( 'error', ( err ) => {
+			if( err.toString().includes( "ENOENT" ) ) return resolve( false );
+		} );
+
+		test.stdout.on( 'data', ( data ) => {
+			if( data.toString().includes( "ffmpeg version" ) ) return resolve( true );
+		} );
+	});
+};
+
+
+
 var path = require("path");
 function getTempPath(src) {
 	var ext = path.extname(src),
 		basename = path.basename(src).slice(0, -ext.length),
 		newName = basename + ".ffmetadata" + ext,
-		dirname = path.dirname(src),
+		dirname = path.join(process.cwd(), "temp"),
 		newPath = path.join(dirname, newName);
 	return newPath;
 }
@@ -159,11 +236,17 @@ function getWriteArgs(src, dst, data, options) {
 	getAttachments(options).forEach(function(el) {
 		var inputIndex = inputs.length / 2;
 		inputs.push('-i', el);
+		inputs.push('-id3v2_version', "3")
+		inputs.push('-metadata:s:v', 'title="Album cover"')
+		inputs.push('-metadata:s:v', 'comment="Cover (front)"')
 		maps.push("-map", inputIndex + ":0");
 	});
 
+	//ffmpeg -i neko.mp3 -i image.png -map 0:0 -c:a libmp3lame -map 1:0 -id3v2_version 3 -metadata:s:v title="Album cover" -metadata:s:v comment="Cover (front)" out.mp3
+	//-id3v2_version 3 -metadata:s:v title="Album cover" -metadata:s:v comment="Cover (front)"
 	// Copy flag in order to not transcode
-	args = args.concat(inputs, maps, ["-codec", "copy"]);
+	//args = args.concat(inputs, maps, ["-codec", "copy"]);
+	args = args.concat(inputs, maps, ["-c:a", "libmp3lame"]);
 
 	if (options["id3v1"]) {
 		args.push("-write_id3v1", "1");
@@ -180,7 +263,6 @@ function getWriteArgs(src, dst, data, options) {
 	});
 
 	args.push(dst); // output to src path
-
 	return args;
 }
 
